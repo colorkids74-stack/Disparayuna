@@ -18,6 +18,7 @@ let isReady = false;
 let contacts = [];
 let qrCodeData = null;
 let sendingProgress = null;
+let isSyncing = false;
 
 // ─── Inicializar WhatsApp ─────────────────────────────────────────────────────
 function initWhatsApp() {
@@ -49,6 +50,9 @@ function initWhatsApp() {
     }
   });
 
+  // Pairing code support
+  client.on('ready', () => {});  // placeholder to ensure event order
+
   client.on('loading_screen', (percent, message) => {
     io.emit('status', { status: 'loading', message: `Carregando... ${percent}%` });
   });
@@ -61,19 +65,21 @@ function initWhatsApp() {
     isReady = true;
     qrCodeData = null;
     const info = client.info;
-    io.emit('status', {
-      status: 'ready',
-      message: 'Conectado!',
-      phone: info ? info.wid.user : ''
-    });
+    const phone = info ? info.wid.user : '';
+    
+    // Emite conectado imediatamente — sem esperar sync
+    io.emit('status', { status: 'ready', message: 'Conectado!', phone });
     console.log('WhatsApp conectado!');
-    await syncContacts();
+    
+    // Sync em background automaticamente
+    syncContacts();
   });
 
   client.on('disconnected', (reason) => {
     isReady = false;
     contacts = [];
     qrCodeData = null;
+    isSyncing = false;
     io.emit('status', { status: 'disconnected', message: 'Desconectado. Reconectando...' });
     io.emit('contacts', []);
     console.log('Desconectado:', reason);
@@ -92,72 +98,71 @@ function initWhatsApp() {
 
 // ─── Sincronizar Contatos ─────────────────────────────────────────────────────
 async function syncContacts() {
-  try {
-    io.emit('status', { status: 'syncing', message: 'Sincronizando contatos...' });
+  if (isSyncing) return;
+  isSyncing = true;
 
-    const [allContacts, chats] = await Promise.all([
-      client.getContacts(),
-      client.getChats()
-    ]);
+  try {
+    io.emit('sync_status', { syncing: true, message: 'Sincronizando contatos...' });
 
     const contactMap = new Map();
 
-    // Contatos salvos
-    for (const contact of allContacts) {
-      if (
-        contact.isWAContact &&
-        !contact.isGroup &&
-        !contact.isBusiness &&
-        contact.id.server === 'c.us' &&
-        contact.id.user.length >= 10
-      ) {
-        contactMap.set(contact.id._serialized, {
-          id: contact.id._serialized,
-          name: contact.name || contact.pushname || `+${contact.number}`,
-          number: contact.number,
-          isSaved: contact.isMyContact || false,
-          lastSeen: null
+    // 1) Busca chats primeiro (mais rápido e pega salvos + não salvos)
+    io.emit('sync_status', { syncing: true, message: 'Buscando conversas...' });
+    const chats = await client.getChats();
+
+    for (const chat of chats) {
+      if (!chat.isGroup && chat.id.server === 'c.us' && chat.id.user.length >= 10) {
+        const id = chat.id._serialized;
+        contactMap.set(id, {
+          id,
+          name: chat.name || `+${chat.id.user}`,
+          number: chat.id.user,
+          isSaved: false,
+          lastSeen: chat.timestamp ? new Date(chat.timestamp * 1000).toISOString() : null
         });
       }
     }
 
-    // Contatos não salvos (de chats recentes)
-    for (const chat of chats) {
-      if (!chat.isGroup && chat.id.server === 'c.us') {
-        const id = chat.id._serialized;
-        if (!contactMap.has(id) && chat.id.user.length >= 10) {
-          contactMap.set(id, {
-            id,
-            name: chat.name || `+${chat.id.user}`,
-            number: chat.id.user,
-            isSaved: false,
-            lastSeen: chat.timestamp ? new Date(chat.timestamp * 1000).toISOString() : null
-          });
-        }
+    // Envia parcial imediatamente pra UI já mostrar
+    const partial = Array.from(contactMap.values()).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+    if (partial.length > 0) {
+      contacts = partial;
+      io.emit('contacts', contacts);
+      io.emit('sync_status', { syncing: true, message: `${contacts.length} conversas carregadas. Buscando agenda...` });
+    }
+
+    // 2) Enriquece com contatos salvos da agenda
+    const allContacts = await client.getContacts();
+    for (const contact of allContacts) {
+      if (contact.isWAContact && !contact.isGroup && contact.id.server === 'c.us' && contact.id.user.length >= 10) {
+        const id = contact.id._serialized;
+        const existing = contactMap.get(id);
+        const name = contact.name || contact.pushname || (existing ? existing.name : `+${contact.number}`);
+        contactMap.set(id, {
+          id,
+          name,
+          number: contact.number || contact.id.user,
+          isSaved: contact.isMyContact || false,
+          lastSeen: existing ? existing.lastSeen : null
+        });
       }
     }
 
-    contacts = Array.from(contactMap.values()).sort((a, b) =>
-      a.name.localeCompare(b.name, 'pt-BR')
-    );
-
+    contacts = Array.from(contactMap.values()).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
     io.emit('contacts', contacts);
-    io.emit('status', {
-      status: 'ready',
-      message: 'Conectado!',
-      phone: client.info ? client.info.wid.user : ''
-    });
-
+    io.emit('sync_status', { syncing: false, message: `${contacts.length} contatos sincronizados!` });
     console.log(`Contatos sincronizados: ${contacts.length}`);
   } catch (err) {
     console.error('Erro ao sincronizar contatos:', err);
-    io.emit('status', { status: 'ready', message: 'Conectado!' });
+    io.emit('sync_status', { syncing: false, message: 'Erro na sincronização.' });
+  } finally {
+    isSyncing = false;
   }
 }
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
 app.get('/api/status', (req, res) => {
-  res.json({ isReady, contactsCount: contacts.length });
+  res.json({ isReady, contactsCount: contacts.length, isSyncing });
 });
 
 app.get('/api/contacts', (req, res) => {
@@ -166,6 +171,7 @@ app.get('/api/contacts', (req, res) => {
 
 app.post('/api/sync', async (req, res) => {
   if (!isReady) return res.status(400).json({ error: 'WhatsApp não conectado' });
+  if (isSyncing) return res.json({ success: true, message: 'Sincronização já em andamento' });
   syncContacts();
   res.json({ success: true });
 });
@@ -207,7 +213,6 @@ app.post('/api/send', async (req, res) => {
         contact: contact.name
       });
 
-      // Delay humano + aleatoriedade pra não ser banido
       const randomDelay = delay + Math.floor(Math.random() * 2000);
       await new Promise(resolve => setTimeout(resolve, randomDelay));
 
@@ -234,16 +239,32 @@ app.post('/api/send', async (req, res) => {
 });
 
 app.post('/api/disconnect', async (req, res) => {
+  isReady = false;
+  contacts = [];
+  qrCodeData = null;
+  sendingProgress = null;
+  isSyncing = false;
+  res.json({ success: true });
+  io.emit('status', { status: 'disconnected', message: 'Desconectado.' });
+  io.emit('contacts', []);
   try {
     if (client) {
-      await client.logout();
-      await client.destroy();
+      await client.logout().catch(() => {});
+      await client.destroy().catch(() => {});
     }
-    isReady = false;
-    contacts = [];
-    qrCodeData = null;
-    res.json({ success: true });
-    setTimeout(() => initWhatsApp(), 2000);
+  } catch (err) {
+    console.error('Erro ao desconectar:', err.message);
+  }
+  setTimeout(() => initWhatsApp(), 2000);
+});
+
+// Rota para gerar pairing code
+app.post('/api/pairing-code', async (req, res) => {
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ error: 'Número obrigatório' });
+  try {
+    const code = await client.requestPairingCode(phone.replace(/\D/g, ''));
+    res.json({ success: true, code });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -260,6 +281,11 @@ io.on('connection', (socket) => {
       phone: client?.info?.wid?.user || ''
     });
     socket.emit('contacts', contacts);
+    if (isSyncing) {
+      socket.emit('sync_status', { syncing: true, message: 'Sincronizando contatos...' });
+    } else {
+      socket.emit('sync_status', { syncing: false, message: `${contacts.length} contatos sincronizados` });
+    }
   } else if (qrCodeData) {
     socket.emit('qr', qrCodeData);
     socket.emit('status', { status: 'qr', message: 'Escaneie o QR Code com seu WhatsApp' });
