@@ -537,7 +537,7 @@ function renderContacts() {
   list.innerHTML = filtered.map(function(c) {
     const sel = selectedIds.has(c.id);
     const ini = c.name.split(' ').map(function(w){return w[0];}).slice(0,2).join('').toUpperCase();
-    return '<div class="contact-item ' + (sel?'selected':'') + '" onclick="toggleContact(\\'' + c.id + '\\')">' +
+    return '<div class="contact-item ' + (sel?'selected':'') + '" onclick=\'toggleContact("' + c.id + '")\'>' +
       '<div class="contact-avatar">' + ini + '</div>' +
       '<div class="contact-info"><strong>' + esc(c.name) + '</strong><span>+' + c.number + '</span></div>' +
       '<span class="badge ' + (c.isSaved?'saved':'unsaved') + '">' + (c.isSaved?'Salvo':'Chat') + '</span>' +
@@ -581,7 +581,7 @@ function updateSelectedList() {
   const sel = allContacts.filter(function(c){ return selectedIds.has(c.id); });
   list.innerHTML = sel.map(function(c) {
     const ini = c.name.split(' ').map(function(w){return w[0];}).slice(0,2).join('').toUpperCase();
-    return '<div class="selected-tag"><div class="tag-avatar">' + ini + '</div><span>' + esc(c.name) + '</span><button class="rm" onclick="removeSelected(\\'' + c.id + '\\')">×</button></div>';
+    return '<div class="selected-tag"><div class="tag-avatar">' + ini + '</div><span>' + esc(c.name) + '</span><button class="rm" onclick=\'removeSelected("' + c.id + '")\'>×</button></div>';
   }).join('');
 }
 
