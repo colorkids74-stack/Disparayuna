@@ -50,9 +50,6 @@ function initWhatsApp() {
     }
   });
 
-  // Pairing code support
-  client.on('ready', () => {});  // placeholder to ensure event order
-
   client.on('loading_screen', (percent, message) => {
     io.emit('status', { status: 'loading', message: `Carregando... ${percent}%` });
   });
@@ -66,12 +63,10 @@ function initWhatsApp() {
     qrCodeData = null;
     const info = client.info;
     const phone = info ? info.wid.user : '';
-    
-    // Emite conectado imediatamente — sem esperar sync
+
     io.emit('status', { status: 'ready', message: 'Conectado!', phone });
     console.log('WhatsApp conectado!');
-    
-    // Sync em background automaticamente
+
     syncContacts();
   });
 
@@ -106,7 +101,7 @@ async function syncContacts() {
 
     const contactMap = new Map();
 
-    // 1) Busca chats primeiro (mais rápido e pega salvos + não salvos)
+    // 1) Chats primeiro — rápido, pega salvos e não salvos
     io.emit('sync_status', { syncing: true, message: 'Buscando conversas...' });
     const chats = await client.getChats();
 
@@ -123,7 +118,7 @@ async function syncContacts() {
       }
     }
 
-    // Envia parcial imediatamente pra UI já mostrar
+    // Mostra parcial logo
     const partial = Array.from(contactMap.values()).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
     if (partial.length > 0) {
       contacts = partial;
@@ -131,7 +126,7 @@ async function syncContacts() {
       io.emit('sync_status', { syncing: true, message: `${contacts.length} conversas carregadas. Buscando agenda...` });
     }
 
-    // 2) Enriquece com contatos salvos da agenda
+    // 2) Enriquece com agenda
     const allContacts = await client.getContacts();
     for (const contact of allContacts) {
       if (contact.isWAContact && !contact.isGroup && contact.id.server === 'c.us' && contact.id.user.length >= 10) {
@@ -238,6 +233,7 @@ app.post('/api/send', async (req, res) => {
   sendingProgress = null;
 });
 
+// Desconectar — força imediatamente, não espera o cliente responder
 app.post('/api/disconnect', async (req, res) => {
   isReady = false;
   contacts = [];
@@ -258,10 +254,11 @@ app.post('/api/disconnect', async (req, res) => {
   setTimeout(() => initWhatsApp(), 2000);
 });
 
-// Rota para gerar pairing code
+// Gera código de pareamento (alternativa ao QR Code)
 app.post('/api/pairing-code', async (req, res) => {
   const { phone } = req.body;
   if (!phone) return res.status(400).json({ error: 'Número obrigatório' });
+  if (!client) return res.status(400).json({ error: 'Cliente não inicializado' });
   try {
     const code = await client.requestPairingCode(phone.replace(/\D/g, ''));
     res.json({ success: true, code });
@@ -281,11 +278,9 @@ io.on('connection', (socket) => {
       phone: client?.info?.wid?.user || ''
     });
     socket.emit('contacts', contacts);
-    if (isSyncing) {
-      socket.emit('sync_status', { syncing: true, message: 'Sincronizando contatos...' });
-    } else {
-      socket.emit('sync_status', { syncing: false, message: `${contacts.length} contatos sincronizados` });
-    }
+    socket.emit('sync_status', isSyncing
+      ? { syncing: true, message: 'Sincronizando contatos...' }
+      : { syncing: false, message: `${contacts.length} contatos sincronizados` });
   } else if (qrCodeData) {
     socket.emit('qr', qrCodeData);
     socket.emit('status', { status: 'qr', message: 'Escaneie o QR Code com seu WhatsApp' });
